@@ -1,10 +1,20 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+
 	"github.com/gorilla/websocket"
 )
+
+type Player struct {
+	X, Y int
+}
+
+type Command struct {
+	Key string `json:"key"`
+}
 
 // Configura o "porteiro" que transforma HTTP em WebSocket
 var upgrader = websocket.Upgrader{
@@ -24,6 +34,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Println("Novo cliente conectado! 🔌")
 
+	player := Player{0, 0}
+
 	// 2. O Loop da Conversa (Onde o jogo acontece)
 	for {
 		// Lê mensagem do cliente (React)
@@ -36,10 +48,34 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Recebi do React: %s\n", msg)
 
 		// Responde para o cliente
-		err = conn.WriteMessage(websocket.TextMessage, []byte("Olá React, eu sou o Go!"))
+		err = conn.WriteJSON(player)
 		if err != nil {
 			break
 		}
+
+		// 1. Criamos uma variável para guardar o comando
+		var cmd Command
+		// 2. "Traduzimos" o JSON recebido para a nossa struct
+		err = json.Unmarshal(msg, &cmd)
+		if err != nil {
+			fmt.Println("Erro ao ler JSON:", err)
+			continue
+		}
+
+		// 3. A Lógica de Movimento (O Ditador)
+		switch cmd.Key {
+		case "up":
+			player.Y -= 10 // No computador, subtrair Y sobe a imagem
+		case "down":
+			player.Y += 10
+		case "left":
+			player.X -= 10
+		case "right":
+			player.X += 10
+		}
+
+		// 4. Enviamos o player atualizado de volta para o React
+		conn.WriteJSON(player)
 	}
 }
 

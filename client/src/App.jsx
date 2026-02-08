@@ -3,14 +3,16 @@ import useWebSocket from 'react-use-websocket';
 
 function App() {
   const [messageHistory, setMessageHistory] = useState([]);
+  // Substitua o useState antigo por este:
+const [playerData, setPlayerData] = useState({ X: 0, Y: 0 });
 
   // 1. A Mágica: Conecta no WebSocket do Go
-  const { sendMessage, lastMessage, readyState } = useWebSocket('ws://localhost:8080/ws');
+  const { sendMessage, sendJsonMessage, lastMessage, readyState } = useWebSocket('ws://localhost:8080/ws');
 
   // 2. Sempre que chegar uma mensagem nova do Go, salvamos na lista
   useEffect(() => {
     if (lastMessage !== null) {
-      setMessageHistory((prev) => [...prev, lastMessage.data]);
+      setPlayerData(JSON.parse(lastMessage.data));
     }
   }, [lastMessage]);
 
@@ -19,22 +21,60 @@ function App() {
     sendMessage('Olá Go, aqui é o React!');
   };
 
-  return (
-    <div style={{ padding: '20px', fontFamily: 'sans-serif' }}>
-      <h1>Dreams Architect 🌙</h1>
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      // O switch verifica o valor de event.key
+      switch (event.key) {
+        case 'ArrowUp':
+        case 'w':
+          sendJsonMessage({key: 'up'});
+          // Aqui enviaremos o comando para o Go
+          break;
+        case 'ArrowDown':
+        case 's':
+          sendJsonMessage({key: 'down'});
+          break;
+        case 'ArrowLeft':
+        case 'a':
+          sendJsonMessage({key: 'left'});
+          break;
+        case 'ArrowRight':
+        case 'd':
+          sendJsonMessage({key: 'right'});
+          break;
+        default:
+          break;
+      }
+    };
 
-      <p>Status da Conexão: {readyState === 1 ? '🟢 Conectado' : '🔴 Desconectado'}</p>
+    window.addEventListener('keydown', handleKeyDown);
 
-      <button onClick={handleClick} style={{ fontSize: '16px', padding: '10px' }}>
-        Enviar 'Oi' para o Servidor
-      </button>
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [sendMessage]); // Lembre-se de incluir sendMessage nas dependências
 
-      <h3>O que o servidor respondeu:</h3>
-      <ul>
-        {messageHistory.map((msg, idx) => (
-          <li key={idx}>{msg}</li>
-        ))}
-      </ul>
+return (
+    <div style={{ height: '100vh', width: '100vw', backgroundColor: '#222', overflow: 'hidden' }}>
+      {/* Título fixo no fundo */}
+      <h1 style={{ color: 'white', textAlign: 'center', marginTop: '20px' }}>
+        Dreams Architect 🌙
+      </h1>
+
+      {/* O Nosso Jogador */}
+      <div style={{
+          position: 'absolute',
+          left: playerData.X,
+          top: playerData.Y,
+          fontSize: '40px' // Aumenta o tamanho do emoji
+      }}>
+        🧙‍♂️
+      </div>
+
+      {/* Painel de Debug (Opcional, para ver os números mudando) */}
+      <div style={{ position: 'fixed', bottom: 10, left: 10, color: '#0f0', fontFamily: 'monospace' }}>
+        X: {playerData.X}, Y: {playerData.Y}
+      </div>
     </div>
   );
 }
