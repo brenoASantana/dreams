@@ -47,12 +47,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		fmt.Printf("Recebi do React: %s\n", msg)
 
-		// Responde para o cliente
-		err = conn.WriteJSON(player)
-		if err != nil {
-			break
-		}
-
 		// 1. Criamos uma variável para guardar o comando
 		var cmd Command
 		// 2. "Traduzimos" o JSON recebido para a nossa struct
@@ -65,17 +59,26 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// 3. A Lógica de Movimento (O Ditador)
 		switch cmd.Key {
 		case "up":
-			player.Y -= 10 // No computador, subtrair Y sobe a imagem
+			if player.Y > 0 {
+				player.Y -= 10 // No computador, subtrair Y sobe a imagem
+			}
 		case "down":
-			player.Y += 10
+			if player.Y < 600 {
+				player.Y += 10
+			}
 		case "left":
-			player.X -= 10
+			if player.X > 0 {
+				player.X -= 10
+			}
 		case "right":
-			player.X += 10
+			if player.X < 800 { // Limite para não sair da tela
+				player.X += 10
+			}
 		}
 
 		// 4. Enviamos o player atualizado de volta para o React
 		conn.WriteJSON(player)
+
 	}
 }
 
