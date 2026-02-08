@@ -2,89 +2,245 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+// ============================================================================
+// CONFIGURAÇÕES
+// ============================================================================
+
+const (
+	// Servidor
+	ServerPort    = ":8080"
+	ReadTimeout   = 10 * time.Second
+	WriteTimeout  = 10 * time.Second
+	AllowedOrigin = "http://localhost:5173" // URL do Vite em dev
+
+	// Game
+	PlayerMoveStep = 10
+	MaxX           = 800
+	MaxY           = 600
+	PingInterval   = 30 * time.Second
+)
+
+// ============================================================================
+// TIPOS
+// ============================================================================
+
 type Player struct {
-	X, Y int
+	X, Y int `json:"x,y"`
 }
 
 type Command struct {
 	Key string `json:"key"`
 }
 
-// Configura o "porteiro" que transforma HTTP em WebSocket
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Permite que qualquer um conecte (útil para dev)
-	},
+type GameServer struct {
+	upgrader websocket.Upgrader
+	clients  map[*Client]bool
+	mu       sync.RWMutex
+	logger   *log.Logger
 }
 
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// 1. O Upgrade: Transforma a conexão HTTP em WebSocket
-	conn, err := upgrader.Upgrade(w, r, nil)
+type Client struct {
+	conn   *websocket.Conn
+	server *GameServer
+	player Player
+	done   chan struct{}
+}
+
+// ============================================================================
+// INICIALIZAÇÃO
+// ============================================================================
+
+func NewGameServer() *GameServer {
+	return &GameServer{
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				return origin == AllowedOrigin
+			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		},
+		clients: make(map[*Client]bool),
+		logger:  log.New(os.Stdout, "[DREAMS] ", log.LstdFlags|log.Lshortfile),
+	}
+}
+
+// ============================================================================
+// HANDLER WEBSOCKET
+// ============================================================================
+
+func (gs *GameServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := gs.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		fmt.Println("Erro ao conectar:", err)
+		gs.logger.Printf("❌ Erro ao fazer upgrade: %v\n", err)
 		return
 	}
-	defer conn.Close() // Fecha a conexão quando a função acabar
 
-	fmt.Println("Novo cliente conectado! 🔌")
+	client := &Client{
+		conn:   conn,
+		server: gs,
+		player: Player{X: 0, Y: 0},
+		done:   make(chan struct{}),
+	}
 
-	player := Player{0, 0}
+	gs.addClient(client)
+	gs.logger.Println("✅ Novo cliente conectado")
 
-	// 2. O Loop da Conversa (Onde o jogo acontece)
+	// Inicia processamento de mensagens e heartbeat
+	go client.readMessages()
+	go client.sendHeartbeat()
+}
+
+// ============================================================================
+// GERENCIAMENTO DE CLIENTES
+// ============================================================================
+
+func (gs *GameServer) addClient(c *Client) {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	gs.clients[c] = true
+}
+
+func (gs *GameServer) removeClient(c *Client) {
+	gs.mu.Lock()
+	defer gs.mu.Unlock()
+	delete(gs.clients, c)
+	gs.logger.Println("👋 Cliente desconectado")
+}
+
+// ============================================================================
+// LÓGICA DO CLIENTE
+// ============================================================================
+
+func (client *Client) readMessages() {
+	defer func() {
+		client.close()
+		client.server.removeClient(client)
+	}()
+
+	client.conn.SetReadDeadline(time.Now().Add(PingInterval + 5*time.Second))
+
 	for {
-		// Lê mensagem do cliente (React)
-		_, msg, err := conn.ReadMessage()
+		_, msg, err := client.conn.ReadMessage()
 		if err != nil {
-			fmt.Println("Cliente desconectou.")
-			break
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				client.server.logger.Printf("⚠️  Erro ao ler mensagem: %v\n", err)
+			}
+			return
 		}
 
-		fmt.Printf("Recebi do React: %s\n", msg)
-
-		// 1. Criamos uma variável para guardar o comando
-		var cmd Command
-		// 2. "Traduzimos" o JSON recebido para a nossa struct
-		err = json.Unmarshal(msg, &cmd)
-		if err != nil {
-			fmt.Println("Erro ao ler JSON:", err)
+		// Validar e processar comando
+		if err := client.processCommand(msg); err != nil {
+			client.server.logger.Printf("⚠️  Comando inválido: %v\n", err)
 			continue
 		}
 
-		// 3. A Lógica de Movimento (O Ditador)
-		switch cmd.Key {
-		case "up":
-			if player.Y > 0 {
-				player.Y -= 10 // No computador, subtrair Y sobe a imagem
-			}
-		case "down":
-			if player.Y < 600 {
-				player.Y += 10
-			}
-		case "left":
-			if player.X > 0 {
-				player.X -= 10
-			}
-		case "right":
-			if player.X < 800 { // Limite para não sair da tela
-				player.X += 10
-			}
+		// Enviar estado atualizado
+		if err := client.sendState(); err != nil {
+			client.server.logger.Printf("❌ Erro ao enviar estado: %v\n", err)
+			return
 		}
-
-		// 4. Enviamos o player atualizado de volta para o React
-		conn.WriteJSON(player)
-
 	}
 }
 
-func main() {
-	http.HandleFunc("/ws", handleWebSocket) // Nova rota "/ws"
+func (client *Client) processCommand(msg []byte) error {
+	var cmd Command
+	if err := json.Unmarshal(msg, &cmd); err != nil {
+		return fmt.Errorf("JSON inválido: %w", err)
+	}
 
-	fmt.Println("Servidor de Sonhos rodando na porta 8080...")
-	http.ListenAndServe(":8080", nil)
+	if cmd.Key == "" {
+		return errors.New("comando vazio")
+	}
+
+	// Aplicar movimento
+	switch cmd.Key {
+	case "up":
+		if client.player.Y > 0 {
+			client.player.Y -= PlayerMoveStep
+		}
+	case "down":
+		if client.player.Y < MaxY {
+			client.player.Y += PlayerMoveStep
+		}
+	case "left":
+		if client.player.X > 0 {
+			client.player.X -= PlayerMoveStep
+		}
+	case "right":
+		if client.player.X < MaxX {
+			client.player.X += PlayerMoveStep
+		}
+	default:
+		return fmt.Errorf("comando desconhecido: %s", cmd.Key)
+	}
+
+	return nil
+}
+
+func (client *Client) sendState() error {
+	client.conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	return client.conn.WriteJSON(client.player)
+}
+
+func (client *Client) sendHeartbeat() {
+	ticker := time.NewTicker(PingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			client.conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+			if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		case <-client.done:
+			return
+		}
+	}
+}
+
+func (client *Client) close() {
+	close(client.done)
+	client.conn.Close()
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+func main() {
+	gs := NewGameServer()
+
+	http.HandleFunc("/ws", gs.handleWebSocket)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok"}`)
+	})
+
+	server := &http.Server{
+		Addr:         ServerPort,
+		Handler:      http.DefaultServeMux,
+		ReadTimeout:  ReadTimeout,
+		WriteTimeout: WriteTimeout,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	gs.logger.Printf("🚀 Servidor rodando em ws://localhost:8080/ws\n")
+	gs.logger.Printf("🏥 Health check em http://localhost:8080/health\n")
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		gs.logger.Fatalf("❌ Erro ao iniciar servidor: %v\n", err)
+	}
 }
